@@ -1,24 +1,18 @@
 import { priceFeedScope } from '.';
 import { getDeployedContract } from './utils';
 
-// Common token IDs used in testing - update this as needed
-const KNOWN_TOKEN_IDS = [
-  '21742633143463906290569050155826241533067272736897614950488156847949938836455',
-  '21742633143463906290569050155826241533067272736897614950488156847949938836456'
-];
-
 /**
  * Task: Fetches the latest answers from the PriceFeed contract.
  * Optional parameters:
  * - contract: PriceFeed contract address
- * - tokenId: Specific Polymarket token ID to fetch (if not provided, shows all prices)
+ * - tokenId: Specific token ID to fetch (if not provided, shows all prices)
  * - tokenIndex: Specific token index to fetch (if not provided, shows all prices)
  * If the contract address is not provided, fetches from previous deployments.
  */
 priceFeedScope
-  .task('latest', 'Calls the latestAnswer function on the PriceFeed contract')
+  .task('latest', 'Fetches the latest prices from the PriceFeed contract')
   .addOptionalParam('contract', 'The PriceFeed contract address')
-  .addOptionalParam('tokenId', 'Specific Polymarket token ID to fetch')
+  .addOptionalParam('tokenId', 'Specific token ID to fetch')
   .addOptionalParam('tokenIndex', 'Specific token index to fetch')
   .setAction(async ({ contract, tokenId, tokenIndex }, hre) => {
     try {
@@ -42,30 +36,36 @@ priceFeedScope
         console.log('Could not update latest answers. Using cached data if available.\n');
       }
 
-      // Handle tokenId parameter by finding its index in known token IDs
-      let targetIndex = tokenIndex;
+      // Handle tokenId parameter using direct lookup
       if (tokenId !== undefined) {
-        const foundIndex = KNOWN_TOKEN_IDS.findIndex(id => id === tokenId);
-        if (foundIndex === -1) {
-          console.error(`Token ID ${tokenId} not found in known token IDs. Known token IDs:`);
-          KNOWN_TOKEN_IDS.forEach((id, index) => {
-            console.log(`  Index ${index}: ${id}`);
-          });
+        try {
+          // Use generic contract call since TypeScript interface might not be updated yet
+          const price = await priceFeed.getFunction('getPriceByTokenId')(tokenId);
+          console.log(`Price for token ID ${tokenId}: ${price.toString()}`);
+          return;
+        } catch (error) {
+          console.error(`Error getting price for token ID ${tokenId}: ${error}`);
+          try {
+            const allTokenIds = await priceFeed.getAllTokenIds();
+            console.log('Available token IDs:');
+            allTokenIds.forEach((id, index) => {
+              console.log(`  Index ${index}: ${id}`);
+            });
+          } catch (listError) {
+            console.log('Could not retrieve available token IDs');
+          }
           return;
         }
-        targetIndex = foundIndex.toString();
       }
 
-      if (targetIndex !== undefined) {
-        // Fetch specific token price
-        const price = await priceFeed.getPrice(targetIndex);
-
-        // Show token ID if we know it
-        const knownTokenId = KNOWN_TOKEN_IDS[parseInt(targetIndex)];
-        if (knownTokenId) {
-          console.log(`Price for token ID ${knownTokenId} (index ${targetIndex}): ${price.toString()}`);
-        } else {
-          console.log(`Price for token index ${targetIndex}: ${price.toString()}`);
+      if (tokenIndex !== undefined) {
+        // Fetch specific token price by index
+        const price = await priceFeed.getPrice(tokenIndex);
+        try {
+          const tokenIdDisplay = await priceFeed.getTokenId(tokenIndex);
+          console.log(`Price for token ID ${tokenIdDisplay} (index ${tokenIndex}): ${price.toString()}`);
+        } catch (error) {
+          console.log(`Price for token index ${tokenIndex}: ${price.toString()}`);
         }
       } else {
         // Fetch all prices
@@ -75,21 +75,21 @@ priceFeedScope
 
         console.log(`\nToken Count: ${tokenCount.toString()}`);
         console.log('All Prices:');
-        allPrices.forEach((price, index) => {
-          const knownTokenId = KNOWN_TOKEN_IDS[index];
-          if (knownTokenId) {
-            console.log(`  Token ID ${knownTokenId} (index ${index}): ${price.toString()}`);
-          } else {
-            console.log(`  Token index ${index}: ${price.toString()}`);
-          }
-        });
 
-        // Also show legacy latestAnswer for backward compatibility
         try {
-          const legacyAnswer = await priceFeed.latestAnswer();
-          console.log(`\nLegacy Latest Answer (first price): ${legacyAnswer.toString()}`);
+          const allTokenIds = await priceFeed.getAllTokenIds();
+          console.log(`Found ${allTokenIds.length} stored token IDs`);
+          allPrices.forEach((price, index) => {
+            const tokenId = allTokenIds[index] || `index-${index}`;
+            console.log(`  Token ID ${tokenId} (index ${index}): ${price.toString()}`);
+          });
         } catch (error) {
-          console.log('\nLegacy Latest Answer: Not available');
+          console.log(`Error getting token IDs: ${error}`);
+          console.log('Fallback to index-based display');
+          // Fallback to index-based display if token IDs not available
+          allPrices.forEach((price, index) => {
+            console.log(`  Token index ${index}: ${price.toString()}`);
+          });
         }
       }
     } catch (error: unknown) {

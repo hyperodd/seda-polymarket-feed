@@ -28,11 +28,17 @@ contract PriceFeed {
     /// @notice The latest prices for each token ID
     uint256[] public latestPrices;
 
+    /// @notice The token IDs for each price (same order as latestPrices)
+    string[] public storedTokenIds;
+
     /// @notice Thrown when trying to fetch results before any request is transmitted
     error RequestNotTransmitted();
 
     /// @notice Thrown when trying to access an invalid token index
     error InvalidTokenIndex();
+
+    /// @notice Thrown when trying to access a token ID that doesn't exist
+    error TokenIdNotFound();
 
     /**
      * @notice Sets up the contract with SEDA network parameters
@@ -74,6 +80,26 @@ contract PriceFeed {
 
         // Pass the msg.value as fees to the SEDA core
         requestId = SEDA_CORE.postRequest{value: msg.value}(inputs, requestFee, resultFee, batchFee);
+
+        // Parse and store the token IDs
+        bytes memory tokenIdsBytes = bytes(tokenIds);
+        delete storedTokenIds; // Clear previous token IDs
+
+        // Simple parsing: split by comma
+        uint256 start = 0;
+        for (uint256 i = 0; i <= tokenIdsBytes.length; i++) {
+            if (i == tokenIdsBytes.length || tokenIdsBytes[i] == ",") {
+                if (i > start) {
+                    bytes memory tokenIdBytes = new bytes(i - start);
+                    for (uint256 j = 0; j < i - start; j++) {
+                        tokenIdBytes[j] = tokenIdsBytes[start + j];
+                    }
+                    storedTokenIds.push(string(tokenIdBytes));
+                }
+                start = i + 1;
+            }
+        }
+
         return requestId;
     }
 
@@ -98,32 +124,19 @@ contract PriceFeed {
     }
 
     /**
-     * @notice Manual function to set prices (for testing/debugging)
-     * @param prices Array of prices to set
+     * @notice Gets the price for a specific token by token ID
+     * @param tokenId The token ID string
+     * @return The price for the specified token
      */
-    function setPricesManually(uint256[] calldata prices) external {
-        latestPrices = prices;
-    }
-
-    /**
-     * @notice Debug function to see what data the oracle returned
-     * @return The raw result data from the latest request
-     */
-    function getLastResult() external view returns (bytes memory, bool, uint8) {
-        if (requestId == bytes32(0)) revert RequestNotTransmitted();
-
-        SedaDataTypes.Result memory result = SEDA_CORE.getResult(requestId);
-        return (result.result, result.consensus, result.exitCode);
-    }
-
-    /**
-     * @notice Gets the price for a specific token by index
-     * @param tokenIndex The index of the token in the original request
-     * @return The price for the specified token, or 0 if no consensus was reached
-     */
-    function getPrice(uint256 tokenIndex) external view returns (uint256) {
-        if (tokenIndex >= latestPrices.length) revert InvalidTokenIndex();
-        return latestPrices[tokenIndex];
+    function getPriceByTokenId(string calldata tokenId) external view returns (uint256) {
+        // Find the index of the token ID
+        for (uint256 i = 0; i < storedTokenIds.length; i++) {
+            if (keccak256(abi.encodePacked(storedTokenIds[i])) == keccak256(abi.encodePacked(tokenId))) {
+                if (i >= latestPrices.length) revert InvalidTokenIndex();
+                return latestPrices[i];
+            }
+        }
+        revert TokenIdNotFound(); // Token ID not found
     }
 
     /**
@@ -135,25 +148,28 @@ contract PriceFeed {
     }
 
     /**
+     * @notice Gets the token ID for a specific index
+     * @param tokenIndex The index of the token
+     * @return The token ID string
+     */
+    function getTokenId(uint256 tokenIndex) external view returns (string memory) {
+        if (tokenIndex >= storedTokenIds.length) revert InvalidTokenIndex();
+        return storedTokenIds[tokenIndex];
+    }
+
+    /**
+     * @notice Gets all stored token IDs
+     * @return Array of all token ID strings
+     */
+    function getAllTokenIds() external view returns (string[] memory) {
+        return storedTokenIds;
+    }
+
+    /**
      * @notice Gets the number of tokens being tracked
      * @return The count of tokens
      */
     function getTokenCount() external view returns (uint256) {
         return latestPrices.length;
-    }
-
-    /**
-     * @notice Legacy function for backward compatibility
-     * @dev Returns the first price if available
-     * @return The first price as uint128, or 0 if no consensus was reached
-     */
-    function latestAnswer() public view returns (uint128) {
-        if (requestId == bytes32(0)) revert RequestNotTransmitted();
-
-        if (latestPrices.length == 0) {
-            return 0;
-        }
-
-        return uint128(latestPrices[0]);
     }
 }

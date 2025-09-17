@@ -9,5 +9,3 @@ import './deploy';
 import './latest';
 import './transmit';
 import './update';
-import './set-prices';
-import './debug-result';
