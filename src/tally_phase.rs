@@ -1,68 +1,61 @@
 use anyhow::Result;
 use seda_sdk_rs::{elog, get_reveals, log, Process};
 
-/**
- * Executes the tally phase within the SEDA network.
- * This phase aggregates the results (e.g., price data) revealed during the execution phase,
- * calculates the median value, and submits it as the final result.
- * Note: The number of reveals depends on the replication factor set in the data request parameters.
- */
 pub fn tally_phase() -> Result<()> {
-    // Tally inputs can be retrieved from Process.getInputs(), though it is unused in this example.
-    // let tally_inputs = Process::get_inputs();
-
     // Retrieve consensus reveals from the tally phase.
     let reveals = get_reveals()?;
-    // Execution phase now returns a scaled integer (u64) as a string. Use u64 to avoid overflow.
-    let mut prices: Vec<u64> = Vec::new();
 
-    // Iterate over each reveal, parse its content as an unsigned integer (u16), and store it in the prices array.
-    for reveal in reveals {
-        let price_str = match String::from_utf8(reveal.body.reveal) {
-            Ok(value) => value,
-            Err(_err) => {
-                // We should always handle a reveal body with care and not exit/panic when parsing went wrong
-                // It's better to skip that reveal
-                elog!("Reveal body could not be converted to string");
-                continue;
-            }
-        };
-
-        let price = match price_str.trim().parse::<u64>() {
-            Ok(value) => value,
-            Err(_err) => {
-                elog!("Reveal body could not be parsed as u64: {}", price_str);
-                continue;
-            }
-        };
-
-        log!("Received price (scaled int): {}", price);
-        prices.push(price);
-    }
-
-    if prices.is_empty() {
-        // If no valid prices were revealed, report an error indicating no consensus.
+    if reveals.is_empty() {
+        // If no reveals were found, report an error indicating no consensus.
         Process::error("No consensus among revealed results".as_bytes());
         return Ok(());
     }
 
-    // If there are valid prices revealed, calculate the median price from price reports.
-    let final_price = median(prices);
+    // Take the first reveal as the result since we're expecting just the mid price from the API
+    let first_reveal = &reveals[0];
+    let prices = match serde_json::from_slice::<Vec<f64>>(&first_reveal.body.reveal) {
+        Ok(prices) => prices,
+        Err(err) => {
+            elog!("Failed to parse revealed prices: {err}");
+            Process::error("Failed to parse revealed prices".as_bytes());
+            return Ok(());
+        }
+    };
 
-    // Report the successful result in the tally phase, encoding the result as bytes.
-    Process::success(final_price.to_string().as_bytes());
+    log!("Final prices: {prices:?}");
 
-    Ok(())
-}
+    // Convert f64 prices to scaled integers (multiply by 1,000,000 to preserve 6 decimal places)
+    // For example: 0.105 -> 105000, 0.895 -> 895000
+    let scaled_prices: Vec<u64> = prices
+        .iter()
+        .map(|&price| (price * 1_000_000.0) as u64)
+        .collect();
 
-fn median(mut nums: Vec<u64>) -> u64 {
-    nums.sort();
-    let middle = nums.len() / 2;
+    log!("Scaled prices for EVM: {scaled_prices:?}");
 
-    if nums.len() % 2 == 0 {
-        // average the two middle values; integer division intentionally drops fraction
-        return (nums[middle - 1] + nums[middle]) / 2;
+    // Create ABI-encoded data for uint256[] that Solidity can decode
+    let mut abi_encoded = Vec::new();
+
+    // ABI encoding for dynamic array uint256[]:
+    // 1. Offset to array data (32 bytes) = 0x20
+    abi_encoded.extend_from_slice(&[0u8; 31]);
+    abi_encoded.push(0x20);
+
+    // 2. Array length (32 bytes)
+    let array_length = scaled_prices.len() as u64;
+    abi_encoded.extend_from_slice(&[0u8; 24]);
+    abi_encoded.extend_from_slice(&array_length.to_be_bytes());
+
+    // 3. Array elements (each 32 bytes)
+    for price in scaled_prices {
+        abi_encoded.extend_from_slice(&[0u8; 24]);
+        abi_encoded.extend_from_slice(&price.to_be_bytes());
     }
 
-    nums[middle]
+    log!("ABI-encoded data length: {} bytes", abi_encoded.len());
+
+    // Report the successful result in the tally phase.
+    Process::success(&abi_encoded);
+
+    Ok(())
 }
